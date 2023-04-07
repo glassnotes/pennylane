@@ -42,6 +42,7 @@ from .special_unitary import SpecialUnitary
 from .hamiltonian import Hamiltonian
 from ..identity import Identity
 from ..snapshot import Snapshot
+from .ionizer_ops import *
 
 ops = {
     "Identity",
@@ -109,6 +110,9 @@ ops = {
     "FermionicSWAP",
     "Barrier",
     "WireCut",
+    "GPI",
+    "GPI2",
+    "MS"
 }
 
 
