@@ -5,57 +5,71 @@ import numpy as np
 
 import pennylane as qml
 import pennylane.math as math
-
+from pennylane.transforms.optimization.optimization_utils import find_next_gate
 from pennylane.transforms import qfunc_transform
-from .optimization_utils import find_next_gate
 
 from pennylane.transforms.decompositions.ionizer_decomposition_utils import _rescale_phases, extract_gpi2_gpi_gpi2_angles
-from pennylane.transforms.decompositions import decomp_map
-from .ionizer_transform_utils import _apply_two_gate_identities, _apply_three_gate_identities
+from pennylane.transforms.decompositions.ionizer_decompositions import decomp_map
 from pennylane.ops import GPI, GPI2, MS
+from .ionizer_transform_utils import (
+    search_and_apply_two_gate_identities,
+    search_and_apply_three_gate_identities,
+)
 
 
 @qfunc_transform
-def commute_through_ms_gates(tape):
+def commute_through_ms_gates(tape, direction="right"):
     """Apply a transform that passes through a tape and pushes GPI/GPI2
     gates with appropriate (commuting) angles through MS gates."""
     list_copy = tape.operations.copy()
 
-    while len(list_copy) > 0:
-        current_gate = list_copy[0]
-        list_copy.pop(0)
+    if direction == "left":
+        list_copy = list_copy[::-1]
 
-        # Apply MS as we find them
-        if len(current_gate.wires) == 2:
-            qml.apply(current_gate)
-            continue
+    with qml.QueuingManager.stop_recording():
+        with qml.tape.QuantumTape() as commuted_tape:
+            while len(list_copy) > 0:
+                current_gate = list_copy[0]
+                list_copy.pop(0)
 
-        # Find the next gate that acts on the same wires
-        next_gate_idx = find_next_gate(current_gate.wires, list_copy)
+                # Apply MS as we find them
+                if len(current_gate.wires) == 2:
+                    qml.apply(current_gate)
+                    continue
 
-        # If there is no next gate, just apply this one and move on
-        if next_gate_idx is None:
-            qml.apply(current_gate)
-            continue
+                # Find the next gate that acts on the same wires
+                next_gate_idx = find_next_gate(current_gate.wires, list_copy)
 
-        next_gate = list_copy[next_gate_idx]
+                # If there is no next gate, just apply this one and move on
+                if next_gate_idx is None:
+                    qml.apply(current_gate)
+                    continue
 
-        # To limit code duplication, decide whether to apply next gate or not.
-        apply_current_gate = True
+                next_gate = list_copy[next_gate_idx]
 
-        # Check if next gate is MS and see if we can commute through it.
-        if next_gate.name == "MS":
-            # The following commute through MS gates on either qubit:
-            # GPI2(0), GPI2(π), GPI2(-π), GPI(0), GPI(π), GPI(-π)
-            if current_gate.name in ["GPI", "GPI2"]:
-                angle = math.abs(current_gate.data[0])
-                if math.isclose(angle, 0.0) or math.isclose(angle, np.pi):
-                    list_copy.insert(next_gate_idx + 1, current_gate)
-                    apply_current_gate = False
+                # To limit code duplication, decide whether to apply next gate or not.
+                apply_current_gate = True
 
-        # If we didn't commute this gate through, apply it.
-        if apply_current_gate:
-            qml.apply(current_gate)
+                # Check if next gate is MS and see if we can commute through it.
+                if next_gate.name == "MS":
+                    # The following commute through MS gates on either qubit:
+                    # GPI2(0), GPI2(π), GPI2(-π), GPI(0), GPI(π), GPI(-π)
+                    if current_gate.name in ["GPI", "GPI2"]:
+                        angle = math.abs(current_gate.data[0])
+                        if math.isclose(angle, 0.0) or math.isclose(angle, np.pi):
+                            list_copy.insert(next_gate_idx + 1, current_gate)
+                            apply_current_gate = False
+
+                # If we didn't commute this gate through, apply it.
+                if apply_current_gate:
+                    qml.apply(current_gate)
+
+    if direction == "left":
+        for op in commuted_tape.operations[::-1]:
+            qml.apply(op)
+    else:
+        for op in commuted_tape.operations:
+            qml.apply(op)
 
     for m in tape.measurements:
         qml.apply(m)
@@ -185,30 +199,18 @@ def single_qubit_fusion_gpi(tape):
             qml.apply(gates_to_apply[0])
         # Try applying identities to sequences of two-qubit gates.
         elif len(gates_to_apply) == 2:
-            were_identities_applied = _apply_two_gate_identities(gates_to_apply)
-
-            if not were_identities_applied:
-                qml.apply(gates_to_apply[0])
-                qml.apply(gates_to_apply[1])
-        # If we have three of more gates, put them into the form GPI2/GPI/GPI2
+            search_and_apply_two_gate_identities(gates_to_apply)
+        # If we have exactly three gates, try applying identities to the sequence
+        elif len(gates_to_apply) == 3:
+            search_and_apply_three_gate_identities(gates_to_apply)
+        # If we have more than three gates, we need to fuse.
         else:
-            extract_angles = True
+            running_matrix = qml.matrix(gates_to_apply[0])
 
-            # If we already have something in the right form, don't extract angles
-            if len(gates_to_apply) == 3:
-                if all(
-                    [op.name == name for op, name in zip(gates_to_apply, ["GPI2", "GPI", "GPI2"])]
-                ):
-                    extract_angles = False
-                    gamma, beta, alpha = [gate.data[0] for gate in gates_to_apply]
-            # If we don't we need to manually fuse and get the angles
-            if extract_angles:
-                running_matrix = qml.matrix(gates_to_apply[0])
+            for gate in gates_to_apply[1:]:
+                running_matrix = np.dot(qml.matrix(gate), running_matrix)
 
-                for gate in gates_to_apply[1:]:
-                    running_matrix = np.dot(qml.matrix(gate), running_matrix)
-
-                gamma, beta, alpha = extract_gpi2_gpi_gpi2_angles(running_matrix)
+            gamma, beta, alpha = extract_gpi2_gpi_gpi2_angles(running_matrix)
 
             # If all three angles are the same, GPI2(θ) GPI(θ) GPI2(θ) = I
             if all(math.isclose([gamma, beta, alpha], [gamma])):
@@ -220,29 +222,8 @@ def single_qubit_fusion_gpi(tape):
                 second_gate = GPI(beta, wires=current_gate.wires)
                 third_gate = GPI2(alpha, wires=current_gate.wires)
 
-                gates_to_apply = [first_gate, second_gate, third_gate]
-
-            # Check if an identity can be applied on the first two gates
-            with qml.QueuingManager.stop_recording():
-                can_identities_be_applied = _apply_two_gate_identities(gates_to_apply[:2])
-
-            if can_identities_be_applied:
-                _apply_two_gate_identities(gates_to_apply[:2])
-                qml.apply(gates_to_apply[2])
-                continue
-            else:
-                # If not, apply the first gate, then check if there is anything to be
-                # done between the second and third.
-                with qml.QueuingManager.stop_recording():
-                    can_identities_be_applied = _apply_two_gate_identities(gates_to_apply[1:])
-
-                if can_identities_be_applied:
-                    qml.apply(gates_to_apply[0])
-                    _apply_two_gate_identities(gates_to_apply[1:])
-                    continue
-
-            # If we didn't apply any 2-qubit identities, check for three-qubit ones
-            _apply_three_gate_identities(gates_to_apply)
+            gates_to_apply = [first_gate, second_gate, third_gate]
+            search_and_apply_three_gate_identities(gates_to_apply)
 
     # Queue the measurements normally
     for m in tape.measurements:
@@ -283,7 +264,7 @@ def ionize(tape):
             optimized_tape = transform(optimized_tape)
 
         for _ in range(10):
-            optimized_tape = commute_through_ms_gates(optimized_tape)
+            optimized_tape = commute_through_ms_gates(direction="left")(optimized_tape)
             optimized_tape = single_qubit_fusion_gpi(optimized_tape)
 
     for op in optimized_tape:

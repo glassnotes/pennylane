@@ -107,8 +107,9 @@ class GPI2(Operation):
         array([[ 0.70710678+0.j        , -0.33900505-0.62054458j],
                [ 0.33900505-0.62054458j,  0.70710678+0.j        ]])
         """
+        exponent = -1j * phi
         return qml.math.stack(
-            [[1, -1j * qml.math.exp(-1j * phi)], [-1j * qml.math.exp(1j * phi), 1]]
+            [[1, -1j * qml.math.exp(exponent)], [-1j * qml.math.exp(qml.math.conj(exponent)), 1]]
         ) / np.sqrt(2)
 
     def adjoint(self):
