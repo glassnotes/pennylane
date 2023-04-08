@@ -11,16 +11,18 @@ def _rescale_phases(phases, renormalize=False):
     Args:
         phases (tensor): The phases to rescale.
         renormalize (bool): By default, we rescale into the range -np.pi to
-            np.pi. If this is set to True, rescale instead into the range -1
-            to 1, as this the range of phases accepted by IonQ's native gate.
+            np.pi. If this is set to True, rescale instead into the range -1 to
+            1 (-2\pi to 2\pi) as this the range of phases accepted by IonQ's
+            native gate input specs.
 
     Return:
         (tensor): The rescaled phases.
+
     """
     scaled_phases = math.arctan2(math.sin(phases), math.cos(phases))
 
     if renormalize:
-        scaled_phases = scaled_phases / np.pi
+        scaled_phases = scaled_phases / (2 * np.pi)
 
     return scaled_phases
 
